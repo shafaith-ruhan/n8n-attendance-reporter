@@ -1,0 +1,234 @@
+/**
+ * @file attendance-tracker.js
+ * @description Production-ready JavaScript automation engine for n8n Code Nodes.
+ * Parses Google Sheets data, manages late-entry resolutions using persistent workflow memory,
+ * and outputs localized attendance alerts in Bangla.
+ * 
+ * @author Shafaith Ruhan
+ * @version 1.1.0
+ * @copyright (c) 2026 Shafaith Ruhan. All rights reserved.
+ */
+
+// ==========================================
+// 🛠️ CONFIGURATION BLOCK (ভবিষ্যতে সহজে পরিবর্তনের জন্য)
+// ==========================================
+const CONFIG = {
+  TIMEZONE: "Asia/Dhaka",
+  EXCEL_DATE_EPOCH_OFFSET: 25569,
+  DAY_IN_MS: 86400 * 1000,
+  MIN_EXCEL_SERIAL: 40000
+};
+
+const EMPLOYEES = [
+  { name: "ইব্রাহিম",   statusCol: 1 },
+  { name: "নাবিল",      statusCol: 3 },
+  { name: "জসিম",       statusCol: 5 },
+  { name: "তায়েব",      statusCol: 7 },
+  { name: "পাবেল",      statusCol: 9 },
+  { name: "ইমান আলী",  statusCol: 11 },
+  { name: "সাজ্জাদ",    statusCol: 13 },
+  { name: "পারভেজ",    statusCol: 15 },
+  { name: "সবুজ",      statusCol: 17 },
+  { name: "সজিব",      statusCol: 19 },
+  { name: "নাহিন",     statusCol: 21 },
+  { name: "সাব্বির",    statusCol: 23 },
+  { name: "ইমন",       statusCol: 25 },
+  { name: "বায়জিদ",    statusCol: 27 },
+];
+
+const BN_MONTHS = [
+  "জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন",
+  "জুলাই", "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর"
+];
+
+// ==========================================
+// ⚙️ CORE UTILITY FUNCTIONS
+// ==========================================
+
+/**
+ * Converts an Excel serial date number to a standard JS Date object.
+ * @param {number} serial 
+ * @returns {Date}
+ */
+function serialToDate(serial) {
+  const utcDays = Math.floor(serial - CONFIG.EXCEL_DATE_EPOCH_OFFSET);
+  return new Date(utcDays * CONFIG.DAY_IN_MS);
+}
+
+/**
+ * Parses mixed data types into a reliable Date object.
+ * @param {any} cell 
+ * @returns {Date|null}
+ */
+function parseFlexibleDate(cell) {
+  if (cell === undefined || cell === "" || cell === null) return null;
+  
+  const num = Number(cell);
+  if (!isNaN(num) && num > CONFIG.MIN_EXCEL_SERIAL) return serialToDate(num);
+  
+  const cleaned = String(cell).replace(/[^\w\s\-\/\,]/g, '').trim();
+  const parsed = new Date(cleaned);
+  return !isNaN(parsed.getTime()) ? parsed : null;
+}
+
+/**
+ * Localizes English numerals into Bangla digits.
+ * @param {string|number} str 
+ * @returns {string}
+ */
+function toBanglaDigits(str) {
+  const map = { 0:"০", 1:"১", 2:"২", 3:"৩", 4:"৪", 5:"৫", 6:"৬", 7:"৭", 8:"৮", 9:"৯" };
+  return String(str).split("").map(ch => map[ch] ?? ch).join("");
+}
+
+/**
+ * Formats a Date object into a readable Bangla human format.
+ * @param {Date} date 
+ * @returns {string}
+ */
+function formatBanglaDate(date) {
+  const day = toBanglaDigits(String(date.getUTCDate()).padStart(2, "0"));
+  const month = BN_MONTHS[date.getUTCMonth()];
+  const year = toBanglaDigits(date.getUTCFullYear());
+  return `${day} ${month}, ${year}`;
+}
+
+/**
+ * Maps raw sheet shorthand symbols to structural string labels.
+ * @param {string} val 
+ * @returns {string|null}
+ */
+function symbolToLabel(val) {
+  if (val === undefined || val === "" || val === null) return null;
+  
+  const norm = String(val).replace(/\uFE0F/g, "").trim();
+  const hasCheck = norm.includes("✅");
+  const hasCircle = norm.includes("⭕");
+  const hasCross = norm.includes("❌");
+  
+  if (hasCheck && hasCircle) return "Granted (Leave) ✅⭕";
+  if (hasCircle && hasCross) return "Half day ⭕❌";
+  if (hasCheck) return "Present ✅";
+  if (hasCircle) return "Day Off ⭕";
+  if (hasCross) return "Absent ❌";
+  
+  return `অজানা চিহ্ন (${val})`;
+}
+
+/**
+ * Validates if all expected employees have an entry for the row.
+ * @param {Array} values 
+ * @returns {boolean}
+ */
+function isRowComplete(values) {
+  return EMPLOYEES.every(emp => symbolToLabel(values[emp.statusCol]) !== null);
+}
+
+/**
+ * Generates an array of formatted strings displaying each employee's status.
+ * @param {Array} values 
+ * @returns {string[]}
+ */
+function buildEmployeeLines(values) {
+  return EMPLOYEES.map((emp, idx) => {
+    const label = symbolToLabel(values[emp.statusCol]);
+    const num = toBanglaDigits(idx + 1);
+    return label === null
+      ? `${num}. ${emp.name} — ⚠️ Missing (দেওয়া হয়নি)`
+      : `${num}. ${emp.name} — ${label}`;
+  });
+}
+
+function isoKey(date) {
+  return date.toISOString().split('T')[0];
+}
+
+// ==========================================
+// 🚀 MAIN EXECUTION FLOW
+// ==========================================
+const items = $input.all();
+
+// Initialize Localized Current Time
+const nowDhaka = new Date(new Date().toLocaleString("en-US", { timeZone: CONFIG.TIMEZONE }));
+nowDhaka.setUTCHours(0, 0, 0, 0);
+const todayKey = isoKey(nowDhaka);
+
+// Matrix Map Formulation
+const dateRowMap = {};
+for (const item of items) {
+  const dataObj = item.json;
+  if (!dataObj) continue;
+  
+  const keys = Object.keys(dataObj);
+  if (keys.length === 0) continue;
+  
+  let dateCell = dataObj[keys[0]];
+  if (keys[0] === 'row_number' && keys.length > 1) dateCell = dataObj[keys[1]];
+  
+  const rowDate = parseFlexibleDate(dateCell);
+  if (!rowDate) continue;
+  
+  rowDate.setUTCHours(0, 0, 0, 0);
+  const values = keys.filter(k => k !== 'row_number').map(k => dataObj[k]);
+  dateRowMap[isoKey(rowDate)] = values;
+}
+
+// Persistent Storage Handshake via n8n Context
+const staticData = $getWorkflowStaticData('global');
+if (!staticData.pendingDates) staticData.pendingDates = {};
+
+let message = "";
+const resolvedBlocks = [];
+
+// Phase 1: Evaluate Backlogged/Pending Dates for Late Entries
+for (const key of Object.keys(staticData.pendingDates)) {
+  const values = dateRowMap[key];
+  if (values && isRowComplete(values)) {
+    const dateStr = formatBanglaDate(new Date(key + 'T00:00:00Z'));
+    resolvedBlocks.push({ dateStr, lines: buildEmployeeLines(values) });
+    delete staticData.pendingDates[key];
+  }
+}
+
+// Phase 2: Compute Current Real-Time Report
+const todayValues = dateRowMap[todayKey];
+
+if (!todayValues) {
+  message += `⚠️ **অ্যাটেনডেন্স অ্যালার্ট!**\n📅 তারিখ: ${formatBanglaDate(nowDhaka)}\n\n` +
+             `আজকের তারিখের row শিটে খুঁজে পাওয়া যায়নি। অনুগ্রহ করে গুগল শিট চেক করুন।\n\n`;
+  staticData.pendingDates[todayKey] = true;
+} else {
+  const lines = buildEmployeeLines(todayValues);
+  message += `📋 **আজকের অ্যাটেনডেন্স রিপোর্ট**\n📅 তারিখ: ${formatBanglaDate(nowDhaka)}\n\n` + lines.join("\n");
+
+  if (isRowComplete(todayValues)) {
+    message += `\n\n✅ আজকে সবার অ্যাটেন্ডেন্স সঠিকভাবে দেওয়া হয়েছে।`;
+  } else {
+    const missingNames = EMPLOYEES.filter(emp => symbolToLabel(todayValues[emp.statusCol]) === null).map(e => e.name);
+    const missingList = missingNames.map((name, idx) => `${toBanglaDigits(idx + 1)}. ${name}`).join("\n");
+    message += `\n\n⚠️ **নিচের কর্মচারীদের আজকের অ্যাটেন্ডেন্স এখনো শিটে তোলা হয়নি:**\n${missingList}`;
+    staticData.pendingDates[todayKey] = true;
+  }
+}
+
+// Phase 3: Display Late Entries Resolved in This Run
+if (resolvedBlocks.length > 0) {
+  message += `\n\n==============================\n`;
+  message += `⏰ 🚨 **লেট এন্ট্রি রেজল্ভড! (আগের পেন্ডিং ডেটা এখন পূরণ হয়েছে)**\n`;
+  resolvedBlocks.forEach(block => {
+    message += `\n📅 **তারিখ: ${block.dateStr}**\n`;
+    message += block.lines.join("\n") + `\n`;
+  });
+}
+
+// Phase 4: Summarize Outstanding Backlogs
+const pendingKeys = Object.keys(staticData.pendingDates).sort();
+if (pendingKeys.length > 0) {
+  const pendingStrs = pendingKeys.map(k => formatBanglaDate(new Date(k + 'T00:00:00Z')));
+  message += `\n\n==============================\n`;
+  message += `⏳ **এখনো তোলা হয়নি এমন তারিখ:**\n`;
+  message += pendingStrs.join(', ') + ` — এই তারিখগুলোর অ্যাটেন্ডেন্স এখনো সম্পূর্ণ শিটে তোলা হয়নি।\n`;
+}
+
+// Return Structured Payload Object to n8n Output Channel
+return [{ json: { type: "manager", message } }];
