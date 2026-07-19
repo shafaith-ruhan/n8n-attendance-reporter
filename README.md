@@ -1,2 +1,66 @@
-# n8n-attendance-reporter
-An automated HR &amp; attendance reporting JavaScript engine for n8n. It dynamically parses Google Sheets data, tracks leaves/absences, manages late-entry resolutions using workflow memory, and generates beautifully localized reports in Bangla.
+[README_ATTENDANCE.md](https://github.com/user-attachments/files/30162013/README_ATTENDANCE.md)
+# BTL Attendance Group – n8n Workflow
+
+এটি একটি সম্পূর্ণ n8n workflow (`BTL_Attendance_Group.json`), যা প্রতিদিন রাত ১১টায় স্বয়ংক্রিয়ভাবে কর্মচারীদের অ্যাটেন্ডেন্স চেক করে এবং Telegram গ্রুপে বাংলা ভাষায় রিপোর্ট পাঠায়।
+
+## ওয়ার্কফ্লো স্ট্রাকচার
+
+```
+Daily 11 PM (Schedule Trigger)
+        ↓
+btlcumilla@gmail.com (Google Sheets — read row)
+        ↓
+Code in JavaScript (অ্যাটেন্ডেন্স প্রসেস ও মেসেজ তৈরি)
+        ↓
+BTL Attendance Group (Telegram — মেসেজ পাঠানো)
+```
+
+## কী কী করে
+
+1. **প্রতিদিন রাত ১১টায়** Google Sheets থেকে সেদিনের অ্যাটেন্ডেন্স রো পড়ে।
+2. প্রতিটি কর্মচারীর কলামে ✅ (উপস্থিত), ⭕ (ছুটি), ❌ (অনুপস্থিত) — এই চিহ্নগুলো পড়ে অবস্থা বের করে।
+3. **আজকের রিপোর্ট** তৈরি করে — কে উপস্থিত, কে অনুপস্থিত, কার তথ্য এখনো দেওয়া হয়নি।
+4. যদি আজকের রো-ই খুঁজে না পাওয়া যায় বা কারো তথ্য মিসিং থাকে, সেই তারিখ **পেন্ডিং** হিসেবে ওয়ার্কফ্লোর `staticData`-তে জমা থাকে (`$getWorkflowStaticData`)।
+5. পরবর্তী কোনো দিন যদি সেই পুরনো তারিখের ডেটা শিটে পূরণ হয়ে যায়, তাহলে তা **"লেট এন্ট্রি রেজল্ভড"** হিসেবে রিপোর্টে একবার দেখায় এবং পেন্ডিং লিস্ট থেকে বাদ যায়।
+6. এখনো পেন্ডিং থাকা সব তারিখের একটা সংক্ষিপ্ত রিমাইন্ডারও প্রতিদিনের মেসেজের শেষে যুক্ত হয়।
+
+## ⚠️ গুরুত্বপূর্ণ বৈশিষ্ট্য (বর্তমান সীমাবদ্ধতা)
+
+এই ওয়ার্কফ্লোতে **কোনো নির্দিষ্ট lookback limit (যেমন ৭ দিন) নেই।** একবার কোনো তারিখ পেন্ডিং হয়ে গেলে, তা যতদিন না ডেটা পূরণ হচ্ছে ততদিন পর্যন্ত `staticData`-তে জমা থেকে প্রতিদিন রিমাইন্ডারে দেখাতে থাকবে — সময়ের কোনো সীমা নেই।
+
+> ভবিষ্যতে চাইলে এতে একটা `LOOKBACK_DAYS` লিমিট যোগ করে নির্দিষ্ট দিন পরে পুরনো পেন্ডিং তারিখ অটোমেটিক রিমাইন্ডার থেকে বাদ দেওয়া যাবে (তবে দেরিতে ডেটা এলে সেটা তখনও রেজল্ভড হিসেবে গণনা হবে)।
+
+## কনফিগারেশন
+
+Code node-এর একদম শুরুতে `EMPLOYEES` অ্যারেতে কর্মচারীর নাম ও তার স্ট্যাটাস কলামের ইনডেক্স বসানো আছে:
+
+```javascript
+const EMPLOYEES = [
+  { name: "ইব্রাহিম",   statusCol: 1 },
+  { name: "নাবিল",      statusCol: 3 },
+  ...
+];
+```
+
+নতুন কর্মচারী যোগ/বাদ দিতে হলে এই লিস্ট এডিট করলেই হবে।
+
+## প্রয়োজনীয় Credentials (n8n-এ)
+
+| Node | Credential Type |
+|---|---|
+| btlcumilla@gmail.com | Google Sheets OAuth2 |
+| BTL Attendance Group | Telegram API |
+
+> **নোট:** এই JSON ফাইলে Google Sheet ID এবং Telegram Chat ID আসল মান হিসেবেই রাখা আছে (এই রিপো Private)। নিজের ইনস্ট্যান্সে ইমপোর্ট করার সময় নিজের Sheet ID, Chat ID ও credentials বসিয়ে নিন।
+
+## ব্যবহার (n8n এ ইমপোর্ট করতে)
+
+1. n8n → **Workflows** → **Import from File**
+2. `BTL_Attendance_Group.json` সিলেক্ট করুন
+3. Google Sheets ও Telegram credentials নিজের অ্যাকাউন্ট দিয়ে রিকনফিগার করুন
+4. Sheet-এর `documentId` ও Telegram-এর `chatId` নিজেরটা দিয়ে বদলে দিন
+5. Workflow **Active** করে দিন
+
+## টাইমজোন
+
+সব তারিখ হিসাব `Asia/Dhaka` টাইমজোন অনুযায়ী করা হয়।
